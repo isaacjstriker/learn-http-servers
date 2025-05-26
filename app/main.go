@@ -1,19 +1,36 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"sync/atomic"
+	"os"
 	"strings"
+	"sync/atomic"
+
+	"github.com/isaacjstriker/learn-http-servers/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 func main() {
+	godotenv.Load()
+	dbURL := os.Getenv("postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable")
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Printf("Error fetching database: %s", err)
+		os.Exit(1)
+	}
+	dbQueries := database.New(db)
+
 	const filepathRoot = "."
 	const port = "8080"
 
-	cfg := apiConfig{}
+	cfg := apiConfig{
+		dbQueries: dbQueries,
+	}
 
 	mux := http.NewServeMux()
 	fileHandler := http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))
@@ -42,6 +59,7 @@ func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
