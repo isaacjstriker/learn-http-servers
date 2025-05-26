@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,6 +20,7 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("GET /admin/metrics", http.HandlerFunc(cfg.handlerMetrics))
 	mux.HandleFunc("POST /admin/reset", http.HandlerFunc(cfg.handlerReset))
+	mux.HandleFunc("POST /api/validate_chirp", http.HandlerFunc(cfg.handlerValidateChirp))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -58,4 +60,44 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte("Hits: 0"))
+}
+
+func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
+	type parameters struct {
+		Body string `json:"body"`
+	}
+	type returnError struct {
+		Error string `json:"error"`
+	}
+	type returnValid struct {
+		Valid bool `json:"valid"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(returnError{Error: "Something went wrong"})
+		log.Printf("Error decoding parameters: %s\n", err)
+		return
+	}
+
+	if len(params.Body) > 140 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(returnError{Error: "Chirp is too long"})
+		return
+	}
+
+	resp := returnValid{Valid: true}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Write(data)
 }
