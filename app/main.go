@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync/atomic"
+	"strings"
 )
 
 func main() {
@@ -62,42 +63,58 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("Hits: 0"))
 }
 
+func respondWithError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	resp := map[string]string{"error": msg}
+	data, _ := json.Marshal(resp)
+	w.Write(data)
+}
+func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	data, _ := json.Marshal(payload)
+	w.Write(data)
+}
+
+func cleanProfanity(input string) string {
+	badWords := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert": {},
+		"fornax": {},
+	}
+	words := strings.Split(input, " ")
+	for i, word := range words {
+		lower := strings.ToLower(word)
+		if _, found := badWords[lower]; found {
+			words[i] = "****"
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
 	type parameters struct {
 		Body string `json:"body"`
 	}
-	type returnError struct {
-		Error string `json:"error"`
-	}
-	type returnValid struct {
-		Valid bool `json:"valid"`
+	type returnCleaned struct {
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
 	err := decoder.Decode(&params)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(returnError{Error: "Something went wrong"})
-		log.Printf("Error decoding parameters: %s\n", err)
-		return
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+        log.Printf("Error decoding parameters: %s\n", err)
+        return
 	}
 
 	if len(params.Body) > 140 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(returnError{Error: "Chirp is too long"})
+		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
 
-	resp := returnValid{Valid: true}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	data, err := json.Marshal(resp)
-	if err != nil {
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	w.Write(data)
+	cleaned := cleanProfanity(params.Body)
+	respondWithJSON(w, http.StatusOK, returnCleaned{CleanedBody: cleaned})
 }
