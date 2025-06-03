@@ -9,7 +9,9 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/isaacjstriker/learn-http-servers/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -17,7 +19,7 @@ import (
 
 func main() {
 	godotenv.Load()
-	dbURL := os.Getenv("postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable")
+	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Printf("Error fetching database: %s", err)
@@ -30,15 +32,19 @@ func main() {
 
 	cfg := apiConfig{
 		dbQueries: dbQueries,
+		platform:  os.Getenv("PLATFORM"),
 	}
 
 	mux := http.NewServeMux()
 	fileHandler := http.StripPrefix("/app", http.FileServer(http.Dir(filepathRoot)))
 	mux.Handle("/app/", cfg.middlewareMetricsInc(fileHandler))
+
+	// Endpoints
 	mux.HandleFunc("GET /api/healthz", handlerReadiness)
 	mux.HandleFunc("GET /admin/metrics", http.HandlerFunc(cfg.handlerMetrics))
 	mux.HandleFunc("POST /admin/reset", http.HandlerFunc(cfg.handlerReset))
-	mux.HandleFunc("POST /api/validate_chirp", http.HandlerFunc(cfg.handlerValidateChirp))
+	mux.HandleFunc("POST /api/chirps", http.HandlerFunc(cfg.handlerCreateChirp))
+	mux.HandleFunc("POST /api/users", http.HandlerFunc(cfg.handlerCreateUser))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -59,7 +65,8 @@ func handlerReadiness(w http.ResponseWriter, r *http.Request) {
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
-	dbQueries *database.Queries
+	dbQueries      *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -76,6 +83,18 @@ func (cfg *apiConfig) handlerMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerReset(w http.ResponseWriter, r *http.Request) {
+	if cfg.platform != "dev" {
+		respondWithError(w, http.StatusForbidden, "Forbidden access")
+		return
+	}
+
+	// Delete all users
+	err := cfg.dbQueries.DeleteAllUsers(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
 	cfg.fileserverHits.Store(0)
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
 	w.Write([]byte("Hits: 0"))
@@ -98,8 +117,8 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 func cleanProfanity(input string) string {
 	badWords := map[string]struct{}{
 		"kerfuffle": {},
-		"sharbert": {},
-		"fornax": {},
+		"sharbert":  {},
+		"fornax":    {},
 	}
 	words := strings.Split(input, " ")
 	for i, word := range words {
@@ -111,28 +130,87 @@ func cleanProfanity(input string) string {
 	return strings.Join(words, " ")
 }
 
-func (cfg *apiConfig) handlerValidateChirp(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Body string `json:"body"`
+func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Body   string `json:"body"`
+		UserID string `json:"user_id"`
 	}
-	type returnCleaned struct {
-		CleanedBody string `json:"cleaned_body"`
+	type response struct {
+        ID        string `json:"id"`
+        Body      string `json:"body"`
+        UserID    string `json:"user_id"`
+        CreatedAt string `json:"created_at"`
+        UpdatedAt string `json:"updated_at"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
-	params := parameters{}
-	err := decoder.Decode(&params)
-	if err != nil {
+	req := request{}
+	if err := decoder.Decode(&req); err != nil {
 		respondWithError(w, http.StatusBadRequest, "Something went wrong")
-        log.Printf("Error decoding parameters: %s\n", err)
-        return
-	}
-
-	if len(params.Body) > 140 {
-		respondWithError(w, http.StatusBadRequest, "Chirp is too long")
 		return
 	}
 
-	cleaned := cleanProfanity(params.Body)
-	respondWithJSON(w, http.StatusOK, returnCleaned{CleanedBody: cleaned})
+	// Clean profanity
+	cleanedBody := cleanProfanity(req.Body)
+
+	// Optionally: validate body length, user_id format, etc.
+	userUUID, err := uuid.Parse(req.UserID)
+    if err != nil {
+        respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
+        return
+    }
+
+	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+    Body:   cleanedBody,
+    UserID: userUUID,
+})
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create chirp")
+		return
+	}
+
+	resp := response{
+        ID:        chirp.ID.String(),
+        Body:      chirp.Body,
+        UserID:    req.UserID,
+        CreatedAt: chirp.CreatedAt.Format(time.RFC3339),
+        UpdatedAt: chirp.UpdatedAt.Format(time.RFC3339),
+	}
+	respondWithJSON(w, http.StatusCreated, resp)
+}
+
+func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
+	type request struct {
+		Email string `json:"email"`
+	}
+	type response struct {
+		ID        string `json:"id"`
+		CreatedAt string `json:"created_at"`
+		UpdatedAt string `json:"updated_at"`
+		Email     string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	req := request{}
+	err := decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong")
+		log.Printf("Error decoding parameters: %s\n", err)
+		return
+	}
+
+	user, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create user")
+		log.Printf("Error creating user: %s\n", err)
+		return
+	}
+
+	resp := response{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+		Email:     user.Email,
+	}
+	respondWithJSON(w, http.StatusCreated, resp)
 }
