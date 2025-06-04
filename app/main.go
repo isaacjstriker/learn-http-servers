@@ -45,6 +45,8 @@ func main() {
 	mux.HandleFunc("POST /admin/reset", http.HandlerFunc(cfg.handlerReset))
 	mux.HandleFunc("POST /api/chirps", http.HandlerFunc(cfg.handlerCreateChirp))
 	mux.HandleFunc("POST /api/users", http.HandlerFunc(cfg.handlerCreateUser))
+	mux.HandleFunc("GET /api/chirps", http.HandlerFunc(cfg.handlerGetChirps))
+	mux.HandleFunc("GET /api/chirps/{chirpID}", http.HandlerFunc(cfg.handlerGetChirpByID))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -213,4 +215,69 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 		Email:     user.Email,
 	}
 	respondWithJSON(w, http.StatusCreated, resp)
+}
+
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	chirps, err := cfg.dbQueries.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirps")
+		return
+	}
+
+	type response struct {
+		ID        string `json:"id"`
+        Body      string `json:"body"`
+        UserID    string `json:"user_id"`
+        CreatedAt string `json:"created_at"`
+        UpdatedAt string `json:"updated_at"`
+	}
+
+	resp := make([]response, 0, len(chirps))
+	for _, chirp := range chirps {
+		resp = append(resp, response{
+			ID:        chirp.ID.String(),
+            Body:      chirp.Body,
+            UserID:    chirp.UserID.String(),
+            CreatedAt: chirp.CreatedAt.Format(time.RFC3339),
+            UpdatedAt: chirp.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+
+	respondWithJSON(w, http.StatusOK, resp)
+}
+
+func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+
+    id, err := uuid.Parse(chirpID)
+    if err != nil {
+        respondWithError(w, http.StatusBadRequest, "Invalid chirp ID format")
+        return
+    }
+
+    chirp, err := cfg.dbQueries.GetChirpByID(r.Context(), id)
+    if err != nil {
+        if err == sql.ErrNoRows {
+            respondWithError(w, http.StatusNotFound, "Chirp not found")
+        } else {
+            respondWithError(w, http.StatusInternalServerError, "Could not retrieve chirp")
+        }
+        return
+    }
+
+    resp := struct {
+        ID        string `json:"id"`
+        Body      string `json:"body"`
+        UserID    string `json:"user_id"`
+        CreatedAt string `json:"created_at"`
+        UpdatedAt string `json:"updated_at"`
+    }{
+        ID:        chirp.ID.String(),
+        Body:      chirp.Body,
+        UserID:    chirp.UserID.String(),
+        CreatedAt: chirp.CreatedAt.Format(time.RFC3339),
+        UpdatedAt: chirp.UpdatedAt.Format(time.RFC3339),
+    }
+
+    respondWithJSON(w, http.StatusOK, resp)
 }
