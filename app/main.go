@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/isaacjstriker/learn-http-servers/internal/database"
+	"github.com/isaacjstriker/learn-http-servers/internal/auth"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 )
@@ -47,6 +48,7 @@ func main() {
 	mux.HandleFunc("POST /api/users", http.HandlerFunc(cfg.handlerCreateUser))
 	mux.HandleFunc("GET /api/chirps", http.HandlerFunc(cfg.handlerGetChirps))
 	mux.HandleFunc("GET /api/chirps/{chirpID}", http.HandlerFunc(cfg.handlerGetChirpByID))
+	mux.HandleFunc("POST /api/login", http.HandlerFunc(cfg.handlerLogin))
 
 	srv := &http.Server{
 		Addr:    ":" + port,
@@ -182,39 +184,47 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request)
 }
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Email string `json:"email"`
-	}
-	type response struct {
-		ID        string `json:"id"`
-		CreatedAt string `json:"created_at"`
-		UpdatedAt string `json:"updated_at"`
-		Email     string `json:"email"`
-	}
+    type request struct {
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    type response struct {
+        ID        string `json:"id"`
+        CreatedAt string `json:"created_at"`
+        UpdatedAt string `json:"updated_at"`
+        Email     string `json:"email"`
+    }
 
-	decoder := json.NewDecoder(r.Body)
-	req := request{}
-	err := decoder.Decode(&req)
-	if err != nil {
-		respondWithError(w, http.StatusBadRequest, "Something went wrong")
-		log.Printf("Error decoding parameters: %s\n", err)
-		return
-	}
+    decoder := json.NewDecoder(r.Body)
+    req := request{}
+    err := decoder.Decode(&req)
+    if err != nil || req.Email == "" || req.Password == "" {
+        respondWithError(w, http.StatusBadRequest, "Email and password are required")
+        return
+    }
 
-	user, err := cfg.dbQueries.CreateUser(r.Context(), req.Email)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not create user")
-		log.Printf("Error creating user: %s\n", err)
-		return
-	}
+    hashedPassword, err := auth.HashPassword(req.Password)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Could not hash password")
+        return
+    }
 
-	resp := response{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
-		Email:     user.Email,
-	}
-	respondWithJSON(w, http.StatusCreated, resp)
+    user, err := cfg.dbQueries.CreateUser(r.Context(), database.CreateUserParams{
+        Email:          req.Email,
+        HashedPassword: hashedPassword,
+    })
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Could not create user")
+        return
+    }
+
+    resp := response{
+        ID:        user.ID.String(),
+        CreatedAt: user.CreatedAt.Format(time.RFC3339),
+        UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+        Email:     user.Email,
+    }
+    respondWithJSON(w, http.StatusCreated, resp)
 }
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
@@ -279,5 +289,46 @@ func (cfg *apiConfig) handlerGetChirpByID(w http.ResponseWriter, r *http.Request
         UpdatedAt: chirp.UpdatedAt.Format(time.RFC3339),
     }
 
+    respondWithJSON(w, http.StatusOK, resp)
+}
+
+func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
+    type request struct {
+        Email    string `json:"email"`
+        Password string `json:"password"`
+    }
+    type response struct {
+        ID        string `json:"id"`
+        CreatedAt string `json:"created_at"`
+        UpdatedAt string `json:"updated_at"`
+        Email     string `json:"email"`
+    }
+
+    decoder := json.NewDecoder(r.Body)
+    req := request{}
+    if err := decoder.Decode(&req); err != nil || req.Email == "" || req.Password == "" {
+        respondWithError(w, http.StatusBadRequest, "Email and password are required")
+        return
+    }
+
+    // Fetch user by email
+    user, err := cfg.dbQueries.GetUserByEmail(r.Context(), req.Email)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "Invalid email or password")
+        return
+    }
+
+    // Check password
+    if err := auth.CheckPasswordHash(user.HashedPassword, req.Password); err != nil {
+        respondWithError(w, http.StatusUnauthorized, "Invalid email or password")
+        return
+    }
+
+    resp := response{
+        ID:        user.ID.String(),
+        CreatedAt: user.CreatedAt.Format(time.RFC3339),
+        UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
+        Email:     user.Email,
+    }
     respondWithJSON(w, http.StatusOK, resp)
 }
