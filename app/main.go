@@ -21,6 +21,7 @@ import (
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+	tokenSecret := os.Getenv("TOKEN_STRING")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Printf("Error fetching database: %s", err)
@@ -34,6 +35,7 @@ func main() {
 	cfg := apiConfig{
 		dbQueries: dbQueries,
 		platform:  os.Getenv("PLATFORM"),
+		tokenSecret: tokenSecret,
 	}
 
 	mux := http.NewServeMux()
@@ -71,6 +73,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
 	platform       string
+	tokenSecret    string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -135,52 +138,58 @@ func cleanProfanity(input string) string {
 }
 
 func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Body   string `json:"body"`
-		UserID string `json:"user_id"`
-	}
-	type response struct {
+    type request struct {
+        Body string `json:"body"`
+    }
+    type response struct {
         ID        string `json:"id"`
         Body      string `json:"body"`
         UserID    string `json:"user_id"`
         CreatedAt string `json:"created_at"`
         UpdatedAt string `json:"updated_at"`
-	}
+    }
 
-	decoder := json.NewDecoder(r.Body)
-	req := request{}
-	if err := decoder.Decode(&req); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Something went wrong")
-		return
-	}
-
-	// Clean profanity
-	cleanedBody := cleanProfanity(req.Body)
-
-	// Optionally: validate body length, user_id format, etc.
-	userUUID, err := uuid.Parse(req.UserID)
+    // 1. Get and validate JWT from Authorization header
+    tokenString, err := auth.GetBearerToken(r.Header)
     if err != nil {
-        respondWithError(w, http.StatusBadRequest, "Invalid user_id format")
+        respondWithError(w, http.StatusUnauthorized, "Missing or invalid Authorization header")
+        return
+    }
+    userID, err := auth.ValidateJWT(tokenString, cfg.tokenSecret)
+    if err != nil {
+        respondWithError(w, http.StatusUnauthorized, "Invalid or expired token")
         return
     }
 
-	chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
-    Body:   cleanedBody,
-    UserID: userUUID,
-})
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not create chirp")
-		return
-	}
+    // 2. Decode request body
+    decoder := json.NewDecoder(r.Body)
+    req := request{}
+    if err := decoder.Decode(&req); err != nil {
+        respondWithError(w, http.StatusBadRequest, "Something went wrong")
+        return
+    }
 
-	resp := response{
+    // 3. Clean profanity
+    cleanedBody := cleanProfanity(req.Body)
+
+    // 4. Create chirp in DB
+    chirp, err := cfg.dbQueries.CreateChirp(r.Context(), database.CreateChirpParams{
+        Body:   cleanedBody,
+        UserID: userID,
+    })
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Could not create chirp")
+        return
+    }
+
+    resp := response{
         ID:        chirp.ID.String(),
         Body:      chirp.Body,
-        UserID:    req.UserID,
+        UserID:    chirp.UserID.String(),
         CreatedAt: chirp.CreatedAt.Format(time.RFC3339),
         UpdatedAt: chirp.UpdatedAt.Format(time.RFC3339),
-	}
-	respondWithJSON(w, http.StatusCreated, resp)
+    }
+    respondWithJSON(w, http.StatusCreated, resp)
 }
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -296,12 +305,14 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
     type request struct {
         Email    string `json:"email"`
         Password string `json:"password"`
+		ExpiresInSeconds *int `json:"expires_in_seconds,omitempty"`
     }
     type response struct {
         ID        string `json:"id"`
         CreatedAt string `json:"created_at"`
         UpdatedAt string `json:"updated_at"`
         Email     string `json:"email"`
+		Token     string `json:"token"`
     }
 
     decoder := json.NewDecoder(r.Body)
@@ -324,11 +335,29 @@ func (cfg *apiConfig) handlerLogin(w http.ResponseWriter, r *http.Request) {
         return
     }
 
+	// Determine token expiration
+	maxSeconds := 3600
+	expiresIn := maxSeconds
+	if req.ExpiresInSeconds != nil && *req.ExpiresInSeconds > 0 {
+		if *req.ExpiresInSeconds < maxSeconds {
+			expiresIn = *req.ExpiresInSeconds
+		}
+	}
+	expiration := time.Duration(expiresIn) * time.Second
+
+    // Create JWT token
+    token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, expiration)
+    if err != nil {
+        respondWithError(w, http.StatusInternalServerError, "Could not create token")
+        return
+    }
+
     resp := response{
         ID:        user.ID.String(),
         CreatedAt: user.CreatedAt.Format(time.RFC3339),
         UpdatedAt: user.UpdatedAt.Format(time.RFC3339),
         Email:     user.Email,
+        Token:     token,
     }
     respondWithJSON(w, http.StatusOK, resp)
 }
